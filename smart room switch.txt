@@ -1,0 +1,489 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <DHT.h>
+
+// =================================================
+// PIN DEFINITIONS
+// =================================================
+
+#define IR_A_PIN     2     // Outside sensor
+#define DHT_PIN      3
+#define IR_B_PIN     4     // Inside sensor
+
+#define LED_PIN      5
+#define RELAY_PIN    6
+
+#define DHT_TYPE DHT11
+
+
+// =================================================
+// OLED
+// =================================================
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define OLED_ADDRESS 0x3C
+
+Adafruit_SSD1306 display(
+  SCREEN_WIDTH,
+  SCREEN_HEIGHT,
+  &Wire,
+  OLED_RESET
+);
+
+
+// =================================================
+// DHT11
+// =================================================
+
+DHT dht(DHT_PIN, DHT_TYPE);
+
+
+// =================================================
+// RELAY
+// Most relay modules are ACTIVE LOW
+// =================================================
+
+#define RELAY_ON  LOW
+#define RELAY_OFF HIGH
+
+
+// =================================================
+// PEOPLE COUNTER
+// =================================================
+
+int peopleCount = 0;
+
+
+// =================================================
+// SENSOR STATES
+// =================================================
+
+int lastA = HIGH;
+int lastB = HIGH;
+
+
+// =================================================
+// STATE MACHINE
+// =================================================
+
+enum DirectionState {
+
+  IDLE,
+
+  A_FIRST,   // A detected first -> possible entry
+
+  B_FIRST    // B detected first -> possible exit
+};
+
+DirectionState state = IDLE;
+
+
+// =================================================
+// TIMING
+// =================================================
+
+unsigned long sequenceStartTime = 0;
+
+const unsigned long SEQUENCE_TIMEOUT = 3000;
+
+
+// =================================================
+// SETUP
+// =================================================
+
+void setup() {
+
+  Serial.begin(9600);
+
+  // IR sensors
+  pinMode(IR_A_PIN, INPUT);
+  pinMode(IR_B_PIN, INPUT);
+
+  // LED
+  pinMode(LED_PIN, OUTPUT);
+
+  // Relay
+  pinMode(RELAY_PIN, OUTPUT);
+
+  // Initially OFF
+  digitalWrite(LED_PIN, LOW);
+  digitalWrite(RELAY_PIN, RELAY_OFF);
+
+  // DHT
+  dht.begin();
+
+  // OLED
+  if (!display.begin(
+        SSD1306_SWITCHCAPVCC,
+        OLED_ADDRESS
+      )) {
+
+    Serial.println("OLED not found!");
+
+    while (1);
+  }
+
+
+  // Starting screen
+
+  display.clearDisplay();
+
+  display.setTextColor(SSD1306_WHITE);
+
+  display.setTextSize(1);
+
+  display.setCursor(25, 20);
+  display.println("SMART BUILDING");
+
+  display.setCursor(35, 35);
+  display.println("STARTING...");
+
+  display.display();
+
+  delay(2000);
+}
+
+
+// =================================================
+// LOOP
+// =================================================
+
+void loop() {
+
+  // ------------------------------------------------
+  // READ IR SENSORS
+  // ------------------------------------------------
+
+  int sensorA = digitalRead(IR_A_PIN);
+  int sensorB = digitalRead(IR_B_PIN);
+
+
+  // ------------------------------------------------
+  // DETECTION
+  // Most IR modules:
+  // LOW = object detected
+  // ------------------------------------------------
+
+  bool A_detected = (sensorA == LOW);
+  bool B_detected = (sensorB == LOW);
+
+
+  // ------------------------------------------------
+  // A → B = PERSON ENTERING
+  // ------------------------------------------------
+
+  if (state == IDLE) {
+
+    if (A_detected && !B_detected) {
+
+      state = A_FIRST;
+
+      sequenceStartTime = millis();
+
+      Serial.println("A detected first");
+      Serial.println("Waiting for B...");
+    }
+
+
+    // ------------------------------------------------
+    // B → A = PERSON EXITING
+    // ------------------------------------------------
+
+    else if (B_detected && !A_detected) {
+
+      state = B_FIRST;
+
+      sequenceStartTime = millis();
+
+      Serial.println("B detected first");
+      Serial.println("Waiting for A...");
+    }
+  }
+
+
+  // ------------------------------------------------
+  // A FIRST → B
+  // PERSON ENTERED
+  // ------------------------------------------------
+
+  if (state == A_FIRST) {
+
+    if (B_detected) {
+
+      peopleCount++;
+
+      Serial.println("====================");
+      Serial.println("PERSON ENTERED");
+      Serial.print("People inside: ");
+      Serial.println(peopleCount);
+      Serial.println("====================");
+
+      state = IDLE;
+
+      delay(500);
+    }
+  }
+
+
+  // ------------------------------------------------
+  // B FIRST → A
+  // PERSON EXITED
+  // ------------------------------------------------
+
+  if (state == B_FIRST) {
+
+    if (A_detected) {
+
+      if (peopleCount > 0) {
+
+        peopleCount--;
+
+      }
+
+      Serial.println("====================");
+      Serial.println("PERSON EXITED");
+      Serial.print("People inside: ");
+      Serial.println(peopleCount);
+      Serial.println("====================");
+
+      state = IDLE;
+
+      delay(500);
+    }
+  }
+
+
+  // ------------------------------------------------
+  // SEQUENCE TIMEOUT
+  // ------------------------------------------------
+
+  if (state != IDLE) {
+
+    if (millis() - sequenceStartTime >
+        SEQUENCE_TIMEOUT) {
+
+      Serial.println("Detection timeout");
+
+      state = IDLE;
+    }
+  }
+
+
+  // ------------------------------------------------
+  // ROOM POWER CONTROL
+  // ------------------------------------------------
+
+  if (peopleCount > 0) {
+
+    digitalWrite(LED_PIN, HIGH);
+
+  }
+  else {
+
+    digitalWrite(LED_PIN, LOW);
+
+    digitalWrite(RELAY_PIN, RELAY_OFF);
+  }
+
+
+  // ------------------------------------------------
+  // DHT11
+  // ------------------------------------------------
+
+  float temperature = dht.readTemperature();
+
+  float humidity = dht.readHumidity();
+
+
+  // ------------------------------------------------
+  // FAN / PUMP CONTROL
+  // ------------------------------------------------
+
+  if (peopleCount > 0) {
+
+    if (!isnan(temperature)) {
+
+      // Fan/pump ON when temperature >= 30°C
+
+      if (temperature >= 30.0) {
+
+        digitalWrite(RELAY_PIN, RELAY_ON);
+
+      }
+      else {
+
+        digitalWrite(RELAY_PIN, RELAY_OFF);
+      }
+    }
+  }
+  else {
+
+    digitalWrite(RELAY_PIN, RELAY_OFF);
+  }
+
+
+  // ------------------------------------------------
+  // OLED DISPLAY
+  // ------------------------------------------------
+
+  display.clearDisplay();
+
+  display.setTextColor(SSD1306_WHITE);
+
+  display.setTextSize(1);
+
+
+  // Title
+
+  display.setCursor(0, 0);
+
+  display.println("SMART BUILDING");
+
+
+  display.drawLine(
+    0,
+    10,
+    127,
+    10,
+    SSD1306_WHITE
+  );
+
+
+  // Temperature
+
+  display.setCursor(0, 14);
+
+  display.print("Temp: ");
+
+  if (isnan(temperature)) {
+
+    display.println("ERROR");
+
+  }
+  else {
+
+    display.print(temperature);
+
+    display.println(" C");
+  }
+
+
+  // Humidity
+
+  display.setCursor(0, 25);
+
+  display.print("Humidity: ");
+
+  if (isnan(humidity)) {
+
+    display.println("ERROR");
+
+  }
+  else {
+
+    display.print(humidity);
+
+    display.println(" %");
+  }
+
+
+  // People count
+
+  display.setCursor(0, 36);
+
+  display.print("People: ");
+
+  display.println(peopleCount);
+
+
+  // Light
+
+  display.setCursor(0, 47);
+
+  display.print("Light: ");
+
+  if (peopleCount > 0) {
+
+    display.print("ON");
+
+  }
+  else {
+
+    display.print("OFF");
+  }
+
+
+  // Fan
+
+  display.setCursor(70, 47);
+
+  display.print("Fan: ");
+
+  if (digitalRead(RELAY_PIN) == RELAY_ON) {
+
+    display.print("ON");
+
+  }
+  else {
+
+    display.print("OFF");
+  }
+
+
+  // Room status
+
+  display.setCursor(0, 58);
+
+  if (peopleCount > 0) {
+
+    display.print("ROOM OCCUPIED");
+
+  }
+  else {
+
+    display.print("ROOM EMPTY");
+  }
+
+
+  display.display();
+
+
+  // ------------------------------------------------
+  // SERIAL MONITOR
+  // ------------------------------------------------
+
+  Serial.print("People: ");
+  Serial.print(peopleCount);
+
+  Serial.print(" | Temp: ");
+
+  if (isnan(temperature)) {
+
+    Serial.print("ERROR");
+
+  }
+  else {
+
+    Serial.print(temperature);
+    Serial.print(" C");
+  }
+
+  Serial.print(" | Humidity: ");
+
+  if (isnan(humidity)) {
+
+    Serial.println("ERROR");
+
+  }
+  else {
+
+    Serial.print(humidity);
+    Serial.println(" %");
+  }
+
+
+  delay(200);
+}
